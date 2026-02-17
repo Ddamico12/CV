@@ -2,19 +2,20 @@
 
 Real-time human pose estimation with **REBA (Rapid Entire Body Assessment)** ergonomic scoring. Uses YOLOv8 Nano Pose to detect 17 body keypoints, compute joint angles, and assign color-coded REBA risk scores per body region.
 
-Two operating modes:
+Three operating modes:
 
 | Script | Inference | Hardware needed |
 |---|---|---|
 | `test_pose_angles_webcam.py` | Host CPU (webcam) | Any webcam |
-| `oak_pose_angles.py` | OAK-D Pro VPU (on-device) | Luxonis OAK-D Pro + USB 3 cable |
+| `oak_pose_angles.py` | OAK-D Pro VPU (on-device) | 1x Luxonis OAK-D Pro + USB 3 cable |
+| `oak_dual_camera_reba.py` | OAK-D Pro VPU (on-device, dual) | 2x Luxonis OAK-D Pro + USB cables |
 
 ## Requirements
 
 - **OS**: Windows 10 or 11 (x64)
 - **Python**: 3.10 or 3.11 recommended (3.14 may work but some packages lack wheels)
 - **Webcam**: Built-in or USB webcam for the test script
-- **OAK-D Pro**: Required only for `oak_pose_angles.py`
+- **OAK-D Pro**: 1x required for `oak_pose_angles.py`, 2x required for `oak_dual_camera_reba.py`
 
 ## Installation
 
@@ -81,12 +82,55 @@ python test_pose_angles_webcam.py --csv session1.csv --video session1.mp4
 
 Press **q** in the OpenCV window to stop recording and quit.
 
-### OAK-D Pro on-device script
+### OAK-D Pro single-camera script
 
 ```powershell
 # Plug in OAK-D Pro via USB 3 port, then:
 python oak_pose_angles.py
+
+# Custom output paths
+python oak_pose_angles.py --csv session1.csv --video session1.mp4
 ```
+
+### OAK-D Pro dual-camera script
+
+Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance.
+
+```powershell
+# List connected devices to find their MxIDs
+python oak_dual_camera_reba.py --list-devices
+
+# Run with explicit camera assignment
+python oak_dual_camera_reba.py --profile-camera <MXID> --front-camera <MXID>
+
+# Auto-detect (when exactly 2 cameras are connected)
+python oak_dual_camera_reba.py
+
+# With manual flags for conditions that can't be auto-detected
+python oak_dual_camera_reba.py --arm-supported --wrist-deviated
+```
+
+The display shows three panels side by side: `[PROFILE view | FUSED REBA panel | FRONT view]`. The center panel shows the fused REBA score, risk level, detected flags, and component scores. A colored border indicates the overall risk level.
+
+#### Auto-detected flags (from front camera)
+
+| Condition | Detection method |
+|---|---|
+| Trunk twist | L/R torso-side length asymmetry (ratio < 0.75) |
+| Trunk side-bend | Lateral lean of mid-shoulder vs mid-hip > 10 degrees |
+| Neck twist | Ear visibility asymmetry (one ear hidden) |
+| Neck side-bend | Nose lateral offset from mid-shoulder > 15% shoulder width |
+| Arm abduction | Front-view arm angle > 30 degrees from trunk vertical |
+| Shoulder raised | Shoulder height difference > 10% of torso length |
+| Unilateral stance | Hip height asymmetry > 10% of shoulder width |
+
+#### Dual-camera output files
+
+| File | Description |
+|---|---|
+| `dual_reba_angles.csv` | 3 rows per synced frame (profile, front, fused) with angles, scores, and detected flags |
+| `dual_reba_overlay.mp4` | Video of the three-panel display |
+| `reba_alerts.csv` | Timestamped alerts when risk level changes or stays Medium+ for 10 seconds |
 
 ### REBA adjustment flags
 
@@ -200,13 +244,13 @@ The skeleton overlay and table text are colored by REBA component score:
 
 ## Known limitations
 
-- **2D only**: Pose estimation is from a single camera with no depth information. Flexion vs extension is approximate, especially from a front-facing camera. For best trunk and neck readings, position the camera to the side of the subject.
-- **Wrist angles**: COCO-17 keypoints include the wrist but not the hand or fingers. Without a point beyond the wrist, wrist flexion/extension cannot be measured. Wrist columns in the CSV are always blank.
-- **Twist detection**: Neck and trunk twist cannot be detected from a 2D image. Use the `--neck-twist` and `--trunk-twist` CLI flags when you observe twisting.
-- **Side bending**: Similarly, side bending is hard to distinguish from flexion in 2D. Use the `--neck-side-bend` and `--trunk-side-bend` flags.
+- **2D only**: Pose estimation is from a single camera with no depth information. Flexion vs extension is approximate, especially from a front-facing camera. For best trunk and neck readings, position the camera to the side of the subject. The dual-camera script mitigates this by fusing side and front views.
+- **Wrist angles**: COCO-17 keypoints include the wrist but not the hand or fingers. Without a point beyond the wrist, wrist flexion/extension cannot be measured. Wrist columns in the CSV are always blank. Use `--wrist-deviated` and `--wrist-twisted` flags when applicable.
+- **Twist/side-bend detection (single camera)**: Neck and trunk twist cannot be detected from a single 2D image. Use the `--neck-twist` and `--trunk-twist` CLI flags when you observe twisting. The dual-camera script auto-detects these from the front camera.
 - **REBA flags are global**: Adjustment flags apply the same to every frame in the recording. They cannot be toggled mid-session.
 - **Single person**: Only the highest-confidence detected person is scored per frame.
 - **Host CPU speed**: The webcam test script runs at approximately 8 to 10 FPS on a typical laptop CPU. The OAK-D Pro on-device script targets approximately 30 FPS.
+- **Dual-camera USB bandwidth**: Both OAK-D Pro cameras sharing the same USB host controller can cause intermittent XLink disconnects. For best stability, plug cameras into separate USB controllers (e.g., one front panel, one rear panel, or use a PCIe USB card).
 
 ## Troubleshooting
 
@@ -255,9 +299,14 @@ The skeleton overlay and table text are colored by REBA component score:
 ```
 CV/
   test_pose_angles_webcam.py   # REBA scoring via webcam (host CPU)
-  oak_pose_angles.py           # Pose estimation on OAK-D Pro (on-device)
+  oak_pose_angles.py           # Single-camera REBA on OAK-D Pro (on-device)
+  oak_dual_camera_reba.py      # Dual-camera fused REBA on 2x OAK-D Pro
   README.md                    # This file
-  joint_angles.csv             # Generated: REBA angles and scores per frame
-  pose_overlay.mp4             # Generated: video with skeleton overlay
+  joint_angles.csv             # Generated: single-camera angles/scores per frame
+  pose_overlay.mp4             # Generated: single-camera video with overlay
+  dual_reba_angles.csv         # Generated: dual-camera fused angles/scores
+  dual_reba_overlay.mp4        # Generated: dual-camera three-panel video
+  reba_alerts.csv              # Generated: dual-camera risk-level alerts
   yolov8n-pose.pt              # Auto-downloaded model weights (not committed)
+  .depthai_cached_models/      # Auto-downloaded OAK models (not committed)
 ```
