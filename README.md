@@ -112,7 +112,17 @@ Press **s** to swap the PROFILE/FRONT labels if the cameras are assigned to the 
 
 ### OAK-D Pro dual-camera REBA script
 
-Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance. Use `oak_dual_camera_preview.py` (see above) to verify camera placement before starting a REBA session.
+Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance.
+
+On startup, a **built-in camera preview phase** shows a side-by-side live view so you can verify which camera is PROFILE (side) and which is FRONT before REBA analysis begins. Preview controls:
+
+| Key | Action |
+|---|---|
+| **s** | Swap PROFILE / FRONT assignments |
+| **Enter** / **Space** / **r** | Confirm assignments and start REBA analysis |
+| **q** | Quit without starting REBA |
+
+You can also use `oak_dual_camera_preview.py` (see above) for standalone camera placement testing without running REBA.
 
 ```powershell
 # List connected devices to find their MxIDs
