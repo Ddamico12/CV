@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model weights (auto-downloaded at runtime)
+*.pt
+
+# Generated output files
+joint_angles.csv
+pose_overlay.mp4
+
+# Claude Code
+.claude/
