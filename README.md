@@ -112,7 +112,7 @@ Press **s** to swap the PROFILE/FRONT labels if the cameras are assigned to the 
 
 ### OAK-D Pro dual-camera REBA script
 
-Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance.
+Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance. Use `oak_dual_camera_preview.py` (see above) to verify camera placement before starting a REBA session.
 
 ```powershell
 # List connected devices to find their MxIDs
@@ -129,6 +129,14 @@ python oak_dual_camera_reba.py --arm-supported --wrist-deviated
 ```
 
 The display shows three panels side by side: `[PROFILE view | FUSED REBA panel | FRONT view]`. The center panel shows the fused REBA score, risk level, detected flags, and component scores. A colored border indicates the overall risk level.
+
+Only three manual flags are needed for the dual-camera script, since the front camera auto-detects the rest:
+
+| Flag | Effect |
+|---|---|
+| `--arm-supported` | -1 upper arm score |
+| `--wrist-deviated` | +1 wrist score |
+| `--wrist-twisted` | +1 wrist score |
 
 #### Auto-detected flags (from front camera)
 
@@ -150,9 +158,9 @@ The display shows three panels side by side: `[PROFILE view | FUSED REBA panel |
 | `dual_reba_overlay.mp4` | Video of the three-panel display |
 | `reba_alerts.csv` | Timestamped alerts when risk level changes or stays Medium+ for 10 seconds |
 
-### REBA adjustment flags
+### REBA adjustment flags (single-camera scripts)
 
-The following flags apply REBA manual adjustments globally to all frames. Enable them when you visually observe the condition during recording:
+The following flags apply to `test_pose_angles_webcam.py` and `oak_pose_angles.py`. They add REBA manual adjustments globally to all frames. Enable them when you visually observe the condition during recording. (The dual-camera script auto-detects most of these — see the table above for its three manual flags.)
 
 | Flag | Effect | REBA region |
 |---|---|---|
