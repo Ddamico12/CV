@@ -8,9 +8,15 @@ __pycache__/
 # Model weights (auto-downloaded at runtime)
 *.pt
 
+# DepthAI cached models
+.depthai_cached_models/
+
 # Generated output files
 joint_angles.csv
 pose_overlay.mp4
+dual_reba_angles.csv
+dual_reba_overlay.mp4
+reba_alerts.csv
 
 # Claude Code
 .claude/
