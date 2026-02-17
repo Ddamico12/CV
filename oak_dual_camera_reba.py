@@ -70,7 +70,7 @@ MODEL_SLUG = "luxonis/yolov8-nano-pose-estimation:coco-512x288"
 KP_THRESHOLD = 0.3
 DET_THRESHOLD = 0.4
 DISPLAY_SCALE = 1.5
-SMOOTHING_WINDOW = 20
+SMOOTHING_WINDOW = 5
 ALERT_COOLDOWN_SECONDS = 10.0
 SYNC_TOLERANCE_SEC = 0.10
 
@@ -343,22 +343,20 @@ def score_upper_arm(angle, shoulder_raised=False, abducted=False, supported=Fals
 
 
 def score_lower_arm(elbow_angle):
-    """Lower arm: 60-100 deg = 1, otherwise = 2."""
+    """Lower arm: 80-120 deg included angle = 1, otherwise = 2."""
     if math.isnan(elbow_angle):
         return float("nan")
-    if 60 <= elbow_angle <= 100:
+    if 80 <= elbow_angle <= 120:
         return 1
     return 2
 
 
 def score_wrist(angle, deviated=False, twisted=False):
-    """Wrist: 0-15 = 1, >15 = 2. +1 deviated, +1 twisted."""
+    """Wrist: 0-15 = 1, >15 = 2. +1 if deviated OR twisted (single adj)."""
     if math.isnan(angle):
         return float("nan")
     s = 1 if abs(angle) <= 15 else 2
-    if deviated:
-        s += 1
-    if twisted:
+    if deviated or twisted:
         s += 1
     return s
 
@@ -489,10 +487,13 @@ def compute_reba(pts, flags):
 # ---------------------------------------------------------------------------
 # Overall REBA score from component scores (Table A / B / C)
 # ---------------------------------------------------------------------------
-def compute_reba_overall(neck_s, trunk_s, legs_s, upper_arm_s, lower_arm_s, wrist_s):
+def compute_reba_overall(neck_s, trunk_s, legs_s, upper_arm_s, lower_arm_s,
+                         wrist_s, force_load=0, coupling=0, activity=0):
     """Compute the overall REBA score (1-15) from component scores.
 
     Takes the worst-case (max) left/right arm scores.
+    Applies REBA adjustments: force/load to Score A, coupling to Score B,
+    activity to final score.
     Returns (score_a, score_b, reba_score) or (NaN, NaN, NaN).
     """
     nan = float("nan")
@@ -506,15 +507,18 @@ def compute_reba_overall(neck_s, trunk_s, legs_s, upper_arm_s, lower_arm_s, wris
     trunk_i = max(0, min(int(round(trunk_s)) - 1, 4))
     legs_i = max(0, min(int(round(legs_s)) - 1, 3))
     score_a = REBA_TABLE_A[neck_i][trunk_i][legs_i]
+    score_a = min(score_a + force_load, 12)
 
     ua_i = max(0, min(int(round(upper_arm_s)) - 1, 5))
     la_i = max(0, min(int(round(lower_arm_s)) - 1, 1))
     wr_i = max(0, min(int(round(wrist_s)) - 1, 2))
     score_b = REBA_TABLE_B[ua_i][la_i][wr_i]
+    score_b = min(score_b + coupling, 12)
 
     sa_i = max(0, min(score_a - 1, 11))
     sb_i = max(0, min(score_b - 1, 11))
     reba_score = REBA_TABLE_C[sa_i][sb_i]
+    reba_score = min(reba_score + activity, 15)
 
     return score_a, score_b, reba_score
 
@@ -579,7 +583,7 @@ def fuse_reba_dicts(profile_rb, front_rb, profile_pts, front_pts, manual_flags):
         if not math.isnan(l_torso) and not math.isnan(r_torso):
             if l_torso > 1e-6 and r_torso > 1e-6:
                 ratio = min(l_torso, r_torso) / max(l_torso, r_torso)
-                if ratio < 0.75:
+                if ratio < 0.85:
                     fused["trunk_twist"] = True
 
         # Neck side-bend: nose lateral offset from mid-shoulder > 15% shoulder width
@@ -607,7 +611,7 @@ def fuse_reba_dicts(profile_rb, front_rb, profile_pts, front_pts, manual_flags):
                 arm_vec = (front_pts[el_i][0] - front_pts[sh_i][0],
                            front_pts[el_i][1] - front_pts[sh_i][1])
                 abd_angle = unsigned_angle_between(arm_vec, down_trunk)
-                if not math.isnan(abd_angle) and abd_angle > 30:
+                if not math.isnan(abd_angle) and abd_angle > 20:
                     fused[key] = True
 
         # Shoulder raised: shoulder height difference > 10% of torso length
@@ -617,7 +621,7 @@ def fuse_reba_dicts(profile_rb, front_rb, profile_pts, front_pts, manual_flags):
             l_sh_y = front_pts[L_SHOULDER][1]
             r_sh_y = front_pts[R_SHOULDER][1]
             height_diff = abs(l_sh_y - r_sh_y)
-            if height_diff > 0.10 * torso_len:
+            if height_diff > 0.05 * torso_len:
                 # The higher shoulder (lower y in image) is raised
                 if l_sh_y < r_sh_y:
                     fused["l_shoulder_raised"] = True
@@ -628,7 +632,7 @@ def fuse_reba_dicts(profile_rb, front_rb, profile_pts, front_pts, manual_flags):
         if (front_pts[L_HIP] is not None and front_pts[R_HIP] is not None
                 and not math.isnan(shoulder_width) and shoulder_width > 1e-6):
             hip_diff = abs(front_pts[L_HIP][1] - front_pts[R_HIP][1])
-            if hip_diff > 0.10 * shoulder_width:
+            if hip_diff > 0.05 * shoulder_width:
                 fused["unilateral_legs"] = True
 
     # --- Fuse trunk ---
@@ -754,6 +758,9 @@ def fuse_reba_dicts(profile_rb, front_rb, profile_pts, front_pts, manual_flags):
     score_a, score_b, reba_score = compute_reba_overall(
         fused["neck_score"], fused["trunk_score"], fused["legs_score"],
         upper_arm_s, lower_arm_s, wrist_s,
+        force_load=manual_flags.get("force_load", 0),
+        coupling=manual_flags.get("coupling", 0),
+        activity=manual_flags.get("activity", 0),
     )
     fused["score_a"] = score_a
     fused["score_b"] = score_b
@@ -1047,11 +1054,13 @@ def draw_alert_border(frame, score, thickness=6):
     cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, thickness)
 
 
-def draw_fused_panel(panel, fused_rb, fps, smoothed_score):
+def draw_fused_panel(panel, fused_rb, fps, smoothed_score, adjustments=None):
     """Draw the center info panel with fused REBA score and detected flags."""
     h, w = panel.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     nan = float("nan")
+    if adjustments is None:
+        adjustments = {}
 
     # Dark background
     panel[:] = (30, 30, 30)
@@ -1093,7 +1102,22 @@ def draw_fused_panel(panel, fused_rb, fps, smoothed_score):
     y += 18
     cv2.putText(panel, f"Score C: {_fv(score)}", (10, y), font, 0.42,
                 (180, 180, 180), 1, cv2.LINE_AA)
-    y += 28
+    y += 22
+
+    # REBA adjustments
+    fl = adjustments.get("force_load", 0)
+    cp = adjustments.get("coupling", 0)
+    ac = adjustments.get("activity", 0)
+    adj_color = (0, 180, 255) if (fl or cp or ac) else (100, 100, 100)
+    cv2.putText(panel, f"Force/Load: +{fl}", (10, y), font, 0.37,
+                adj_color, 1, cv2.LINE_AA)
+    y += 16
+    cv2.putText(panel, f"Coupling:   +{cp}", (10, y), font, 0.37,
+                adj_color, 1, cv2.LINE_AA)
+    y += 16
+    cv2.putText(panel, f"Activity:   +{ac}", (10, y), font, 0.37,
+                adj_color, 1, cv2.LINE_AA)
+    y += 22
 
     # Detected flags
     cv2.putText(panel, "Detected:", (10, y), font, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
@@ -1170,6 +1194,7 @@ DUAL_CSV_HEADER = (
     "neck_twist,neck_side_bend,"
     "l_arm_abducted,r_arm_abducted,"
     "l_shoulder_raised,r_shoulder_raised,"
+    "force_load,coupling,activity,"
     "FPS\n"
 )
 
@@ -1201,9 +1226,11 @@ def reba_to_csv_line(rb, fps):
     return ",".join(fields) + "\n"
 
 
-def dual_reba_to_csv_line(rb, source, fps, fused_rb=None):
+def dual_reba_to_csv_line(rb, source, fps, fused_rb=None, adjustments=None):
     """Format one CSV row in extended dual-camera format."""
     ts = time.strftime("%H:%M:%S")
+    if adjustments is None:
+        adjustments = {}
 
     def _v(val):
         if isinstance(val, float) and math.isnan(val):
@@ -1241,6 +1268,9 @@ def dual_reba_to_csv_line(rb, source, fps, fused_rb=None):
         _v(fr.get("r_arm_abducted", False)),
         _v(fr.get("l_shoulder_raised", False)),
         _v(fr.get("r_shoulder_raised", False)),
+        str(adjustments.get("force_load", 0)),
+        str(adjustments.get("coupling", 0)),
+        str(adjustments.get("activity", 0)),
         f"{fps:.1f}",
     ]
     return ",".join(fields) + "\n"
@@ -1430,15 +1460,17 @@ def run_camera_preview(profile_mxid, front_mxid):
 
     try:
         with contextlib.ExitStack() as stack:
+            # Connect by MXID string (not DeviceInfo) for reliable USB
+            # negotiation – matches how the REBA analysis phase connects.
             log("Opening preview – connecting to profile camera...")
             profile_dev = stack.enter_context(
-                dai.Device(profile_info, dai.UsbSpeed.HIGH))
+                dai.Device(profile_mxid))
             log(f"  Connected: {profile_dev.getDeviceName()}")
             time.sleep(2.0)
 
             log("Opening preview – connecting to front camera...")
             front_dev = stack.enter_context(
-                dai.Device(front_info, dai.UsbSpeed.HIGH))
+                dai.Device(front_mxid))
             log(f"  Connected: {front_dev.getDeviceName()}")
             time.sleep(2.0)
 
@@ -1628,6 +1660,20 @@ def main():
     parser.add_argument("--wrist-twisted", action="store_true",
                         help="Wrist is twisted (+1 wrist score)")
 
+    # REBA adjustment scores (Force/Load, Coupling, Activity)
+    parser.add_argument(
+        "--load-score", type=int, default=0, choices=[0, 1, 2, 3],
+        help="Force/Load adjustment for Score A (0: <5kg, 1: 5-10kg, "
+             "2: >10kg, 3: >10kg + shock)")
+    parser.add_argument(
+        "--coupling-score", type=int, default=0, choices=[0, 1, 2, 3],
+        help="Coupling/grip adjustment for Score B (0: good, 1: fair, "
+             "2: poor, 3: unacceptable)")
+    parser.add_argument(
+        "--activity-score", type=int, default=0, choices=[0, 1, 2, 3],
+        help="Activity adjustment for final score (+1 each: static "
+             "posture >1min, repetitive action, rapid change)")
+
     args = parser.parse_args()
 
     # Generous USB timeouts – must be set before any device operations
@@ -1675,6 +1721,9 @@ def main():
         "arm_supported": args.arm_supported,
         "wrist_deviated": args.wrist_deviated,
         "wrist_twisted": args.wrist_twisted,
+        "force_load": args.load_score,
+        "coupling": args.coupling_score,
+        "activity": args.activity_score,
     }
 
     # Per-camera flags (no manual twist/side-bend/abduction/raised --
@@ -1702,9 +1751,14 @@ def main():
     log(f"CSV out: {csv_path}")
     log(f"Video  : {video_path}")
     log(f"Alerts : {os.path.abspath(args.alert_log)}")
-    if any(manual_flags.values()):
-        active = [k for k, v in manual_flags.items() if v]
-        log(f"Manual : {', '.join(active)}")
+    active_flags = [k for k, v in manual_flags.items()
+                    if v and k not in ("force_load", "coupling", "activity")]
+    if active_flags:
+        log(f"Manual : {', '.join(active_flags)}")
+    if manual_flags["force_load"] or manual_flags["coupling"] or manual_flags["activity"]:
+        log(f"Adjust : Force/Load +{manual_flags['force_load']}, "
+            f"Coupling +{manual_flags['coupling']}, "
+            f"Activity +{manual_flags['activity']}")
     log("")
 
     # --- Validate devices are available (fresh enumeration) ---
@@ -1885,7 +1939,8 @@ def main():
                         panel = np.zeros(
                             (cam_h, PANEL_WIDTH, 3), dtype=np.uint8)
                         draw_fused_panel(
-                            panel, fused_rb, fps_value, smoothed)
+                            panel, fused_rb, fps_value, smoothed,
+                            adjustments=manual_flags)
 
                         # Combine: [PROFILE | PANEL | FRONT]
                         combined_frame = np.hstack(
@@ -1911,11 +1966,14 @@ def main():
 
                         # CSV: 3 rows per synced frame
                         csv_file.write(dual_reba_to_csv_line(
-                            p_rb, "profile", fps_value, fused_rb))
+                            p_rb, "profile", fps_value, fused_rb,
+                            adjustments=manual_flags))
                         csv_file.write(dual_reba_to_csv_line(
-                            f_rb, "front", fps_value, fused_rb))
+                            f_rb, "front", fps_value, fused_rb,
+                            adjustments=manual_flags))
                         csv_file.write(dual_reba_to_csv_line(
-                            fused_rb, "fused", fps_value, fused_rb))
+                            fused_rb, "fused", fps_value, fused_rb,
+                            adjustments=manual_flags))
                         csv_file.flush()
                         row_count += 3
 
