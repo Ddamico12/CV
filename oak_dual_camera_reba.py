@@ -1613,6 +1613,9 @@ def run_camera_preview(profile_mxid, front_mxid):
         if "X_LINK" in str(exc) or "device" in str(exc).lower():
             log("\nPreview ERROR: Could not connect to a camera.")
             log("Falling back to configured assignments.\n")
+            # Wait for devices to re-enumerate after failed preview
+            _wait_for_devices_available(profile_mxid, front_mxid)
+            time.sleep(3.0)
             return (profile_mxid, front_mxid)
         raise
 
