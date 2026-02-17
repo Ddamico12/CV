@@ -136,35 +136,48 @@ python oak_dual_camera_reba.py
 
 # With manual flags for conditions that can't be auto-detected
 python oak_dual_camera_reba.py --arm-supported --wrist-deviated
+
+# With REBA adjustment scores (Force/Load, Coupling, Activity)
+python oak_dual_camera_reba.py --load-score 1 --coupling-score 1 --activity-score 1
 ```
 
-The display shows three panels side by side: `[PROFILE view | FUSED REBA panel | FRONT view]`. The center panel shows the fused REBA score, risk level, detected flags, and component scores. A colored border indicates the overall risk level.
+The display shows three panels side by side: `[PROFILE view | FUSED REBA panel | FRONT view]`. The center panel shows the fused REBA score, risk level, Score A/B/C, Force/Load/Coupling/Activity adjustments, detected flags, and component scores. A colored border indicates the overall risk level.
 
 Only three manual flags are needed for the dual-camera script, since the front camera auto-detects the rest:
 
 | Flag | Effect |
 |---|---|
 | `--arm-supported` | -1 upper arm score |
-| `--wrist-deviated` | +1 wrist score |
-| `--wrist-twisted` | +1 wrist score |
+| `--wrist-deviated` | +1 wrist score (combined with `--wrist-twisted` as single +1) |
+| `--wrist-twisted` | +1 wrist score (combined with `--wrist-deviated` as single +1) |
+
+#### REBA adjustment scores
+
+These correspond to REBA Steps 5, 11, and 13 on the standard scoresheet. They add to Score A, Score B, and the final REBA score respectively.
+
+| Flag | Range | Effect | REBA Step |
+|---|---|---|---|
+| `--load-score` | 0-3 | Added to Score A (0: <5kg, 1: 5-10kg, 2: >10kg, 3: >10kg + shock) | Step 5: Force/Load |
+| `--coupling-score` | 0-3 | Added to Score B (0: good grip, 1: fair, 2: poor, 3: unacceptable) | Step 11: Coupling |
+| `--activity-score` | 0-3 | Added to final score (+1 each: static hold >1min, repetitive action, rapid change) | Step 13: Activity |
 
 #### Auto-detected flags (from front camera)
 
 | Condition | Detection method |
 |---|---|
-| Trunk twist | L/R torso-side length asymmetry (ratio < 0.75) |
+| Trunk twist | L/R torso-side length asymmetry (ratio < 0.85) |
 | Trunk side-bend | Lateral lean of mid-shoulder vs mid-hip > 10 degrees |
 | Neck twist | Ear visibility asymmetry (one ear hidden) |
 | Neck side-bend | Nose lateral offset from mid-shoulder > 15% shoulder width |
-| Arm abduction | Front-view arm angle > 30 degrees from trunk vertical |
-| Shoulder raised | Shoulder height difference > 10% of torso length |
-| Unilateral stance | Hip height asymmetry > 10% of shoulder width |
+| Arm abduction | Front-view arm angle > 20 degrees from trunk vertical |
+| Shoulder raised | Shoulder height difference > 5% of torso length |
+| Unilateral stance | Hip height asymmetry > 5% of shoulder width |
 
 #### Dual-camera output files
 
 | File | Description |
 |---|---|
-| `dual_reba_angles.csv` | 3 rows per synced frame (profile, front, fused) with angles, scores, and detected flags |
+| `dual_reba_angles.csv` | 3 rows per synced frame (profile, front, fused) with angles, scores, detected flags, and adjustment scores |
 | `dual_reba_overlay.mp4` | Video of the three-panel display |
 | `reba_alerts.csv` | Timestamped alerts when risk level changes or stays Medium+ for 10 seconds |
 
@@ -181,8 +194,8 @@ The following flags apply to `test_pose_angles_webcam.py` and `oak_pose_angles.p
 | `--shoulder-raised` | +1 upper arm score | Upper arm (both) |
 | `--arm-abducted` | +1 upper arm score | Upper arm (both) |
 | `--arm-supported` | -1 upper arm score | Upper arm (both) |
-| `--wrist-deviated` | +1 wrist score | Wrist (both) |
-| `--wrist-twisted` | +1 wrist score | Wrist (both) |
+| `--wrist-deviated` | +1 wrist score (single +1 with twisted per REBA 9a) | Wrist (both) |
+| `--wrist-twisted` | +1 wrist score (single +1 with deviated per REBA 9a) | Wrist (both) |
 | `--unilateral-legs` | Legs base score = 2 | Legs |
 
 Example with multiple flags:
@@ -253,13 +266,14 @@ An MP4 recording of the webcam feed with all overlays baked in:
 - Score 3: 45 to 90 degrees
 - Score 4: greater than 90 degrees
 
-**Lower arm** (angle = elbow angle):
-- Score 1: 60 to 100 degrees (comfortable mid-range)
-- Score 2: less than 60 or greater than 100 degrees
+**Lower arm** (angle = included elbow angle):
+- Score 1: 80 to 120 degrees (corresponds to REBA flexion 60-100 degrees)
+- Score 2: less than 80 or greater than 120 degrees
 
 **Wrist** (not measurable with current keypoints):
 - Score 1: 0 to 15 degrees
 - Score 2: greater than 15 degrees
+- +1 if deviated from midline OR twisted (single adjustment per REBA Step 9a)
 
 **Legs** (base + knee flexion adjustment):
 - Base 1 (bilateral weight bearing) or Base 2 (unilateral, via `--unilateral-legs`)
