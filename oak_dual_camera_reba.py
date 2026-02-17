@@ -12,6 +12,11 @@ front camera detects lateral movements and asymmetries.  The two views
 are fused per body region, and the overall REBA score (1-15) is computed
 via the standard Table A / B / C lookup.
 
+When exactly 2 cameras are auto-detected (no explicit MXIDs), the script
+starts in a preview mode showing both feeds side by side with PROFILE/FRONT
+labels.  Press 's' to swap assignments, ENTER to confirm and start REBA
+scoring, or 'q' to quit.  Use --no-preview to skip this phase.
+
 Display layout:
     [PROFILE view | FUSED REBA panel | FRONT view]
 
@@ -19,8 +24,10 @@ Install:
     pip install depthai depthai-nodes opencv-python numpy
 
 Run:
-    python oak_dual_camera_reba.py --list-devices
+    python oak_dual_camera_reba.py                     # auto-detect + preview
+    python oak_dual_camera_reba.py --no-preview        # auto-detect, skip preview
     python oak_dual_camera_reba.py --profile-camera <MXID> --front-camera <MXID>
+    python oak_dual_camera_reba.py --list-devices
 
 Press 'q' in the OpenCV window to quit.
 """
@@ -1361,6 +1368,167 @@ def _empty_reba():
 
 
 # ---------------------------------------------------------------------------
+# Camera preview phase (for auto-detected cameras)
+# ---------------------------------------------------------------------------
+def run_preview_phase(profile_info, front_info, profile_mxid, front_mxid):
+    """Run camera-only preview so the user can confirm PROFILE/FRONT assignments.
+
+    Connects its own devices (separate from the REBA phase) and fully
+    disconnects before returning so that fresh device connections can be
+    made for the NN pipelines.
+
+    Returns True if user swapped assignments, False if kept original,
+    or None if the user pressed 'q' to quit entirely.
+    """
+    log("Starting camera preview for placement confirmation...")
+    log("  Press 's' to swap PROFILE/FRONT assignments")
+    log("  Press ENTER to confirm and start REBA scoring")
+    log("  Press 'q' to quit")
+    log("")
+
+    swapped = False
+    user_quit = False
+
+    with contextlib.ExitStack() as preview_stack:
+        # Connect devices for preview (separate connections)
+        log("  Connecting preview devices...")
+        profile_dev = preview_stack.enter_context(
+            dai.Device(profile_info, dai.UsbSpeed.HIGH))
+        time.sleep(2.0)
+        front_dev = preview_stack.enter_context(
+            dai.Device(front_info, dai.UsbSpeed.HIGH))
+        time.sleep(2.0)
+
+        # Build camera-only pipelines (no NN)
+        profile_pipeline = preview_stack.enter_context(
+            dai.Pipeline(profile_dev))
+        p_cam = profile_pipeline.create(dai.node.Camera).build()
+        p_q = p_cam.requestOutput((512, 288)).createOutputQueue()
+
+        front_pipeline = preview_stack.enter_context(
+            dai.Pipeline(front_dev))
+        f_cam = front_pipeline.create(dai.node.Camera).build()
+        f_q = f_cam.requestOutput((512, 288)).createOutputQueue()
+
+        profile_pipeline.start()
+        time.sleep(2.0)
+        front_pipeline.start()
+        log("Both cameras running in preview mode.\n")
+
+        profile_frame = None
+        front_frame = None
+        fps_count = 0
+        fps_timer = time.monotonic()
+        fps_value = 0.0
+
+        while profile_pipeline.isRunning() and front_pipeline.isRunning():
+            p_msg = p_q.tryGet()
+            f_msg = f_q.tryGet()
+
+            if p_msg is not None:
+                raw = p_msg.getCvFrame()
+                if DISPLAY_SCALE != 1.0:
+                    nw = int(raw.shape[1] * DISPLAY_SCALE)
+                    nh = int(raw.shape[0] * DISPLAY_SCALE)
+                    profile_frame = cv2.resize(raw, (nw, nh))
+                else:
+                    profile_frame = raw.copy()
+
+            if f_msg is not None:
+                raw = f_msg.getCvFrame()
+                if DISPLAY_SCALE != 1.0:
+                    nw = int(raw.shape[1] * DISPLAY_SCALE)
+                    nh = int(raw.shape[0] * DISPLAY_SCALE)
+                    front_frame = cv2.resize(raw, (nw, nh))
+                else:
+                    front_frame = raw.copy()
+
+            if profile_frame is not None and front_frame is not None:
+                fps_count += 1
+                elapsed = time.monotonic() - fps_timer
+                if elapsed >= 1.0:
+                    fps_value = fps_count / elapsed
+                    fps_count = 0
+                    fps_timer = time.monotonic()
+
+                # Resize to same height
+                cam_h = max(profile_frame.shape[0], front_frame.shape[0])
+                pf = profile_frame
+                ff = front_frame
+                if pf.shape[0] != cam_h:
+                    s = cam_h / pf.shape[0]
+                    pf = cv2.resize(pf, (int(pf.shape[1] * s), cam_h))
+                if ff.shape[0] != cam_h:
+                    s = cam_h / ff.shape[0]
+                    ff = cv2.resize(ff, (int(ff.shape[1] * s), cam_h))
+
+                # Determine labels based on swap state
+                if swapped:
+                    left_label = "FRONT"
+                    right_label = "PROFILE"
+                    left_id = front_mxid[-6:]
+                    right_id = profile_mxid[-6:]
+                else:
+                    left_label = "PROFILE"
+                    right_label = "FRONT"
+                    left_id = profile_mxid[-6:]
+                    right_id = front_mxid[-6:]
+
+                # Draw labels
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                for frame, label, dev_id in [
+                    (pf, left_label, left_id),
+                    (ff, right_label, right_id),
+                ]:
+                    color = (0, 255, 0) if label == "PROFILE" else (255, 200, 0)
+                    cv2.putText(frame, label, (10, 30), font, 0.8,
+                                (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(frame, label, (10, 30), font, 0.8,
+                                color, 2, cv2.LINE_AA)
+                    cv2.putText(frame, f"ID: ...{dev_id}", (10, 55), font, 0.45,
+                                (0, 0, 0), 2, cv2.LINE_AA)
+                    cv2.putText(frame, f"ID: ...{dev_id}", (10, 55), font, 0.45,
+                                (200, 200, 200), 1, cv2.LINE_AA)
+
+                # Separator line
+                sep = np.full((cam_h, 3, 3), (100, 100, 100), dtype=np.uint8)
+                combined = np.hstack([pf, sep, ff])
+
+                # Bottom instruction bar
+                h, w = combined.shape[:2]
+                bar_h = 30
+                combined[-bar_h:, :] = (40, 40, 40)
+                cv2.putText(
+                    combined,
+                    f"FPS: {fps_value:.1f}  |  's' swap  |  ENTER start REBA  |  'q' quit",
+                    (10, h - 10), font, 0.45,
+                    (180, 180, 180), 1, cv2.LINE_AA)
+
+                cv2.imshow("Dual OAK-D Pro Preview", combined)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                user_quit = True
+                break
+            if key == ord("s"):
+                swapped = not swapped
+                state = "SWAPPED" if swapped else "ORIGINAL"
+                log(f"Camera assignments {state}")
+            if key == 13:  # Enter key
+                break
+
+        cv2.destroyAllWindows()
+
+    # ExitStack has closed: pipelines stopped, devices disconnected.
+    # Allow USB/firmware to fully release before reconnecting.
+    log("Preview closed. Preparing for REBA scoring...")
+    time.sleep(5.0)
+    if user_quit:
+        return None
+    return swapped
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -1392,6 +1560,8 @@ def main():
                         help="Wrist bent from midline (+1 wrist score)")
     parser.add_argument("--wrist-twisted", action="store_true",
                         help="Wrist is twisted (+1 wrist score)")
+    parser.add_argument("--no-preview", action="store_true",
+                        help="Skip camera preview phase (auto-detect only)")
 
     args = parser.parse_args()
 
@@ -1401,16 +1571,21 @@ def main():
         sys.exit(0)
 
     # --- Validate camera args ---
+    auto_detected = False
     if not args.profile_camera or not args.front_camera:
         # Auto-detect if exactly two devices
         devices = dai.Device.getAllAvailableDevices()
         if len(devices) == 2 and not args.profile_camera and not args.front_camera:
             args.profile_camera = devices[0].deviceId
             args.front_camera = devices[1].deviceId
+            auto_detected = True
             log(f"Auto-detected 2 cameras:")
             log(f"  Profile (side): {args.profile_camera}")
             log(f"  Front:          {args.front_camera}")
-            log("  (Use --profile-camera / --front-camera to override)")
+            if not args.no_preview:
+                log("  Preview will start — press 's' to swap, ENTER to confirm")
+            else:
+                log("  (Use --profile-camera / --front-camera to override)")
         else:
             print("ERROR: Both --profile-camera and --front-camera MxIDs are required.",
                   file=sys.stderr)
@@ -1466,7 +1641,6 @@ def main():
 
     smoother = ScoreSmoother()
     alert_logger = AlertLogger(args.alert_log)
-    synchronizer = FrameSynchronizer()
 
     csv_file = open(csv_path, "w", newline="")
     csv_file.write(DUAL_CSV_HEADER)
@@ -1476,7 +1650,6 @@ def main():
     video_writer = None
     fps_value = 0.0
     frame_count = 0
-    fps_timer = time.monotonic()
 
     # Panel dimensions (center info panel)
     PANEL_WIDTH = 200
@@ -1484,6 +1657,30 @@ def main():
     # XLink timeout tuning for multi-device on shared USB hub
     os.environ.setdefault("DEPTHAI_WATCHDOG_INITIAL_DELAY", "60000")
     os.environ.setdefault("DEPTHAI_BOOTUP_TIMEOUT", "60000")
+
+    # --- Preview phase (auto-detected cameras only) ---
+    # Runs with its own device connections, fully disconnects before REBA.
+    if auto_detected and not args.no_preview:
+        result = run_preview_phase(
+            profile_info, front_info,
+            args.profile_camera, args.front_camera)
+        if result is None:
+            log("User cancelled during preview. Exiting.")
+            sys.exit(0)
+        if result:  # swapped
+            profile_info, front_info = front_info, profile_info
+            args.profile_camera, args.front_camera = (
+                args.front_camera, args.profile_camera)
+            log(f"Assignments confirmed (swapped):")
+            log(f"  Profile (side): {args.profile_camera}")
+            log(f"  Front:          {args.front_camera}")
+        else:
+            log("Assignments confirmed (original).")
+
+    # Create synchronizer here (after preview) so its watchdog timer
+    # starts when REBA scoring actually begins, not minutes earlier.
+    synchronizer = FrameSynchronizer()
+    fps_timer = time.monotonic()
 
     try:
         with contextlib.ExitStack() as stack:
