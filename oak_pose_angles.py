@@ -257,7 +257,7 @@ def keypoints_to_pixels(keypoints, w, h):
     pts = []
     for kp in keypoints:
         if kp.confidence >= KP_THRESHOLD:
-            pts.append((kp.x * w, kp.y * h))
+            pts.append((kp.imageCoordinates.x * w, kp.imageCoordinates.y * h))
         else:
             pts.append(None)
     return pts
@@ -713,8 +713,8 @@ def main():
 
                         # Pick the most confident person
                         det = best_detection(det_msg.detections)
-                        if det is not None and len(det.keypoints) >= 17:
-                            pts = keypoints_to_pixels(det.keypoints, w, h)
+                        if det is not None and len(det.getKeypoints()) >= 17:
+                            pts = keypoints_to_pixels(det.getKeypoints(), w, h)
                             rb = compute_reba(pts, flags)
 
                         # Draw
