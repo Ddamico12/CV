@@ -12,7 +12,14 @@ front camera detects lateral movements and asymmetries.  The two views
 are fused per body region, and the overall REBA score (1-15) is computed
 via the standard Table A / B / C lookup.
 
-Display layout:
+On startup a **camera preview phase** shows a side-by-side live view so
+you can verify which camera is PROFILE (side) and which is FRONT before
+REBA analysis begins.  Preview controls:
+    's'              – swap PROFILE / FRONT assignments
+    Enter / Space / 'r' – confirm assignments and start REBA analysis
+    'q'              – quit without starting REBA
+
+Display layout (during REBA analysis):
     [PROFILE view | FUSED REBA panel | FRONT view]
 
 Install:
@@ -1334,59 +1341,133 @@ def initialize_devices(profile_mxid, front_mxid):
 
 
 # ---------------------------------------------------------------------------
-# Camera preview phase
+# Logging helper
 # ---------------------------------------------------------------------------
-def run_camera_preview(profile_info, front_info, profile_mxid, front_mxid):
-    """Run a live preview so the user can verify/swap camera assignments.
+def log(msg):
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
 
-    Shows side-by-side feeds with PROFILE/FRONT labels.
-    Press 's' to swap, Enter/Space to confirm, 'q' to quit the script.
 
-    Returns (final_profile_mxid, final_front_mxid).
+# ---------------------------------------------------------------------------
+# Empty REBA dict
+# ---------------------------------------------------------------------------
+def _empty_reba():
+    nan = float("nan")
+    return {
+        "neck_angle": nan, "neck_score": nan,
+        "trunk_angle": nan, "trunk_score": nan,
+        "l_upper_arm_angle": nan, "l_upper_arm_score": nan,
+        "r_upper_arm_angle": nan, "r_upper_arm_score": nan,
+        "l_lower_arm_angle": nan, "l_lower_arm_score": nan,
+        "r_lower_arm_angle": nan, "r_lower_arm_score": nan,
+        "l_wrist_angle": nan, "l_wrist_score": nan,
+        "r_wrist_angle": nan, "r_wrist_score": nan,
+        "l_knee_angle": nan, "r_knee_angle": nan,
+        "legs_score": nan,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Camera preview: wait for devices to re-enumerate after preview closes
+# ---------------------------------------------------------------------------
+def _wait_for_devices_available(mxid_a, mxid_b, timeout=20.0, poll=0.5):
+    """Poll until both MXIDs reappear in ``dai.Device.getAllAvailableDevices()``.
+
+    After closing preview device connections, USB re-enumeration can take a few
+    seconds.  This helper avoids stale-DeviceInfo issues by waiting for fresh
+    enumeration results.
     """
-    log("=" * 48)
-    log("Camera Preview - Verify Assignments")
-    log("=" * 48)
-    log(f"  Profile: {profile_mxid}")
-    log(f"  Front:   {front_mxid}")
-    log("  Press 's' to swap  |  Enter/Space to confirm  |  'q' to quit")
-    log("")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = {d.deviceId for d in dai.Device.getAllAvailableDevices()}
+        if mxid_a in found and mxid_b in found:
+            log(f"Both devices available ({mxid_a}, {mxid_b}).")
+            return True
+        missing = []
+        if mxid_a not in found:
+            missing.append(mxid_a)
+        if mxid_b not in found:
+            missing.append(mxid_b)
+        log(f"Waiting for device(s) {', '.join(missing)} ...")
+        time.sleep(poll)
+    log("WARNING: Timed out waiting for devices to re-enumerate.")
+    return False
 
-    swapped = False
+
+# ---------------------------------------------------------------------------
+# Camera preview: interactive side-by-side view for camera assignment
+# ---------------------------------------------------------------------------
+def run_camera_preview(profile_mxid, front_mxid):
+    """Show a live side-by-side preview so the user can verify/swap cameras.
+
+    Opens lightweight camera-only pipelines (no NN).
+    Controls:
+        's'              – swap PROFILE / FRONT
+        Enter/Space/'r'  – confirm and start REBA
+        'q'              – quit
+
+    Returns ``(final_profile_mxid, final_front_mxid)`` on confirmation,
+    or ``None`` if the user quits.
+    """
+    # Enumerate devices fresh
+    devices = dai.Device.getAllAvailableDevices()
+    profile_info = None
+    front_info = None
+    for d in devices:
+        if d.deviceId == profile_mxid:
+            profile_info = d
+        if d.deviceId == front_mxid:
+            front_info = d
+
+    if profile_info is None:
+        log(f"Preview: profile camera '{profile_mxid}' not found – skipping preview.")
+        return (profile_mxid, front_mxid)
+    if front_info is None:
+        log(f"Preview: front camera '{front_mxid}' not found – skipping preview.")
+        return (profile_mxid, front_mxid)
+
+    result = None  # will be set on confirm
 
     try:
         with contextlib.ExitStack() as stack:
-            log("Connecting to profile camera (preview)...")
+            log("Opening preview – connecting to profile camera...")
             profile_dev = stack.enter_context(
                 dai.Device(profile_info, dai.UsbSpeed.HIGH))
             log(f"  Connected: {profile_dev.getDeviceName()}")
             time.sleep(2.0)
 
-            log("Connecting to front camera (preview)...")
+            log("Opening preview – connecting to front camera...")
             front_dev = stack.enter_context(
                 dai.Device(front_info, dai.UsbSpeed.HIGH))
             log(f"  Connected: {front_dev.getDeviceName()}")
             time.sleep(2.0)
 
             # Camera-only pipelines (no NN)
-            log("Building preview pipelines...")
+            log("Building profile preview pipeline...")
             profile_pipeline = stack.enter_context(
                 dai.Pipeline(profile_dev))
+            log("  Creating profile camera node...")
             p_cam = profile_pipeline.create(dai.node.Camera).build()
+            log("  Creating profile output queue...")
             p_q = p_cam.requestOutput((512, 288)).createOutputQueue()
+            log("  Starting profile pipeline...")
+            profile_pipeline.start()
+            log("  Profile pipeline started.")
+            time.sleep(2.0)
 
+            log("Building front preview pipeline...")
             front_pipeline = stack.enter_context(
                 dai.Pipeline(front_dev))
+            log("  Creating front camera node...")
             f_cam = front_pipeline.create(dai.node.Camera).build()
+            log("  Creating front output queue...")
             f_q = f_cam.requestOutput((512, 288)).createOutputQueue()
-
-            log("Starting preview...")
-            profile_pipeline.start()
-            time.sleep(2.0)
+            log("  Starting front pipeline...")
             front_pipeline.start()
-            log("Both cameras running. Press Enter/Space to confirm, "
-                "'s' to swap, 'q' to quit.\n")
+            log("  Front pipeline started.")
+            log("  's' swap  |  Enter/Space/'r' confirm  |  'q' quit\n")
 
+            swapped = False
             profile_frame = None
             front_frame = None
             fps_count = 0
@@ -1424,33 +1505,26 @@ def run_camera_preview(profile_info, front_info, profile_mxid, front_mxid):
                         fps_count = 0
                         fps_timer = time.monotonic()
 
-                    # Resize to same height
-                    cam_h = max(profile_frame.shape[0],
-                                front_frame.shape[0])
+                    cam_h = max(profile_frame.shape[0], front_frame.shape[0])
                     pf = profile_frame
                     ff = front_frame
                     if pf.shape[0] != cam_h:
                         s = cam_h / pf.shape[0]
-                        pf = cv2.resize(
-                            pf, (int(pf.shape[1] * s), cam_h))
+                        pf = cv2.resize(pf, (int(pf.shape[1] * s), cam_h))
                     if ff.shape[0] != cam_h:
                         s = cam_h / ff.shape[0]
-                        ff = cv2.resize(
-                            ff, (int(ff.shape[1] * s), cam_h))
+                        ff = cv2.resize(ff, (int(ff.shape[1] * s), cam_h))
 
-                    # Labels based on swap state
+                    # Labels depend on swap state
                     if swapped:
-                        left_label = "FRONT"
-                        right_label = "PROFILE"
+                        left_label, right_label = "FRONT", "PROFILE"
                         left_id = front_mxid[-6:]
                         right_id = profile_mxid[-6:]
                     else:
-                        left_label = "PROFILE"
-                        right_label = "FRONT"
+                        left_label, right_label = "PROFILE", "FRONT"
                         left_id = profile_mxid[-6:]
                         right_id = front_mxid[-6:]
 
-                    # Draw labels
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     for frame, label, dev_id in [
                         (pf, left_label, left_id),
@@ -1469,100 +1543,56 @@ def run_camera_preview(profile_info, front_info, profile_mxid, front_mxid):
                                     (10, 55), font, 0.45,
                                     (200, 200, 200), 1, cv2.LINE_AA)
 
-                    # Separator and combine
                     sep = np.full((cam_h, 3, 3), (100, 100, 100),
                                   dtype=np.uint8)
                     combined = np.hstack([pf, sep, ff])
 
-                    # Bottom bar with instructions
                     h, w = combined.shape[:2]
                     bar_h = 30
                     combined[-bar_h:, :] = (40, 40, 40)
-                    status = "SWAPPED" if swapped else "ORIGINAL"
                     cv2.putText(
                         combined,
-                        f"FPS: {fps_value:.1f}  |  [{status}]  "
-                        f"|  's' swap  |  Enter/Space confirm  "
-                        f"|  'q' quit",
+                        f"FPS: {fps_value:.1f}  |  's' swap  |  "
+                        f"Enter/Space/'r' start REBA  |  'q' quit",
                         (10, h - 10), font, 0.45,
                         (180, 180, 180), 1, cv2.LINE_AA)
 
-                    cv2.imshow(
-                        "Camera Preview - Verify Assignments",
-                        combined)
+                    cv2.imshow("Camera Preview – Verify Assignments",
+                               combined)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
-                    log("Preview: User quit.")
-                    cv2.destroyAllWindows()
-                    sys.exit(0)
+                    result = None
+                    break
                 if key == ord("s"):
                     swapped = not swapped
                     state = "SWAPPED" if swapped else "ORIGINAL"
-                    log(f"Preview: Camera assignments {state}")
-                if key in (13, 32):  # Enter or Space
-                    log("Preview: Confirmed camera assignments.")
+                    log(f"Camera assignments {state}")
+                if key in (13, 32, ord("r")):  # Enter, Space, 'r'
+                    if swapped:
+                        result = (front_mxid, profile_mxid)
+                    else:
+                        result = (profile_mxid, front_mxid)
                     break
 
             cv2.destroyAllWindows()
 
     except RuntimeError as exc:
         if "X_LINK" in str(exc) or "device" in str(exc).lower():
-            log("\nERROR: Could not connect to camera during preview.")
-            log("  1. Make sure both cameras are plugged in")
-            log("  2. Close other apps using the cameras")
-            sys.exit(1)
+            log("\nPreview ERROR: Could not connect to a camera.")
+            log("Falling back to configured assignments.\n")
+            return (profile_mxid, front_mxid)
         raise
 
-    # Wait for both devices to re-enumerate on USB after preview release
-    log("Waiting for cameras to re-enumerate on USB...")
-    target_ids = {profile_mxid, front_mxid}
-    for attempt in range(30):  # up to ~15 seconds
-        time.sleep(0.5)
-        found_ids = {d.deviceId
-                     for d in dai.Device.getAllAvailableDevices()}
-        if target_ids <= found_ids:
-            log("  Both cameras available.")
-            break
-    else:
-        log("WARNING: Timed out waiting for cameras to re-appear. "
-            "Proceeding anyway...")
+    if result is None:
+        return None
 
-    if swapped:
-        log(f"  Final Profile: {front_mxid}")
-        log(f"  Final Front:   {profile_mxid}")
-        return front_mxid, profile_mxid
-    else:
-        log(f"  Final Profile: {profile_mxid}")
-        log(f"  Final Front:   {front_mxid}")
-        return profile_mxid, front_mxid
-
-
-# ---------------------------------------------------------------------------
-# Logging helper
-# ---------------------------------------------------------------------------
-def log(msg):
-    sys.stderr.write(msg + "\n")
-    sys.stderr.flush()
-
-
-# ---------------------------------------------------------------------------
-# Empty REBA dict
-# ---------------------------------------------------------------------------
-def _empty_reba():
-    nan = float("nan")
-    return {
-        "neck_angle": nan, "neck_score": nan,
-        "trunk_angle": nan, "trunk_score": nan,
-        "l_upper_arm_angle": nan, "l_upper_arm_score": nan,
-        "r_upper_arm_angle": nan, "r_upper_arm_score": nan,
-        "l_lower_arm_angle": nan, "l_lower_arm_score": nan,
-        "r_lower_arm_angle": nan, "r_lower_arm_score": nan,
-        "l_wrist_angle": nan, "l_wrist_score": nan,
-        "r_wrist_angle": nan, "r_wrist_score": nan,
-        "l_knee_angle": nan, "r_knee_angle": nan,
-        "legs_score": nan,
-    }
+    # Wait for USB re-enumeration before returning
+    log("Preview closed – waiting for devices to re-enumerate...")
+    _wait_for_devices_available(result[0], result[1])
+    # Extra settle time for USB stack to be fully ready
+    time.sleep(3.0)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1589,9 +1619,6 @@ def main():
     parser.add_argument(
         "--alert-log", default="reba_alerts.csv",
         help="Alert log CSV (default: reba_alerts.csv)")
-    parser.add_argument(
-        "--no-preview", action="store_true",
-        help="Skip the camera preview phase (go straight to REBA analysis)")
 
     # Manual flags (conditions that can't be detected by camera)
     parser.add_argument("--arm-supported", action="store_true",
@@ -1602,6 +1629,10 @@ def main():
                         help="Wrist is twisted (+1 wrist score)")
 
     args = parser.parse_args()
+
+    # Generous USB timeouts – must be set before any device operations
+    os.environ.setdefault("DEPTHAI_WATCHDOG_INITIAL_DELAY", "60000")
+    os.environ.setdefault("DEPTHAI_BOOTUP_TIMEOUT", "60000")
 
     # --- List devices mode ---
     if args.list_devices:
@@ -1628,6 +1659,14 @@ def main():
                 for info in devices:
                     print(f"  MxID: {info.deviceId}")
             sys.exit(1)
+
+    # --- Camera preview phase ---
+    preview_result = run_camera_preview(
+        args.profile_camera, args.front_camera)
+    if preview_result is None:
+        log("User quit during camera preview.")
+        sys.exit(0)
+    args.profile_camera, args.front_camera = preview_result
 
     csv_path = os.path.abspath(args.csv)
     video_path = os.path.abspath(args.video)
@@ -1668,25 +1707,8 @@ def main():
         log(f"Manual : {', '.join(active)}")
     log("")
 
-    # --- Initialize devices ---
-    profile_info, front_info = initialize_devices(
-        args.profile_camera, args.front_camera)
-
-    # --- Camera preview phase ---
-    if not args.no_preview:
-        final_profile, final_front = run_camera_preview(
-            profile_info, front_info,
-            args.profile_camera, args.front_camera)
-        if (final_profile != args.profile_camera
-                or final_front != args.front_camera):
-            log("Re-initializing devices with swapped assignments...")
-            args.profile_camera = final_profile
-            args.front_camera = final_front
-            profile_info, front_info = initialize_devices(
-                args.profile_camera, args.front_camera)
-        log("")
-    else:
-        log("Skipping camera preview (--no-preview).\n")
+    # --- Validate devices are available (fresh enumeration) ---
+    initialize_devices(args.profile_camera, args.front_camera)
 
     smoother = ScoreSmoother()
     alert_logger = AlertLogger(args.alert_log)
@@ -1707,13 +1729,15 @@ def main():
 
     try:
         with contextlib.ExitStack() as stack:
-            # Connect to specific devices first, then build pipelines on them
+            # Connect by MXID string (not DeviceInfo) for fresh USB lookup
             log("Connecting to profile camera...")
-            profile_dev = stack.enter_context(dai.Device(profile_info))
+            profile_dev = stack.enter_context(
+                dai.Device(args.profile_camera))
             log(f"Profile camera connected: {profile_dev.getDeviceName()}")
 
             log("Connecting to front camera...")
-            front_dev = stack.enter_context(dai.Device(front_info))
+            front_dev = stack.enter_context(
+                dai.Device(args.front_camera))
             log(f"Front camera connected: {front_dev.getDeviceName()}")
 
             # Build and start profile camera pipeline
@@ -1924,6 +1948,25 @@ def main():
                 log(f"Saved video to {video_path}")
                 log(f"Logged {alert_logger.count} alerts to "
                     f"{alert_logger.path}")
+                # Stop pipelines explicitly before ExitStack closes devices
+                log("Stopping pipelines...")
+                try:
+                    profile_pipeline.stop()
+                except Exception:
+                    pass
+                try:
+                    front_pipeline.stop()
+                except Exception:
+                    pass
+                log("Closing devices...")
+                try:
+                    profile_dev.close()
+                except Exception:
+                    pass
+                try:
+                    front_dev.close()
+                except Exception:
+                    pass
 
     except RuntimeError as exc:
         if "X_LINK" in str(exc) or "device" in str(exc).lower():
