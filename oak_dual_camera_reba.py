@@ -1334,6 +1334,211 @@ def initialize_devices(profile_mxid, front_mxid):
 
 
 # ---------------------------------------------------------------------------
+# Camera preview phase
+# ---------------------------------------------------------------------------
+def run_camera_preview(profile_info, front_info, profile_mxid, front_mxid):
+    """Run a live preview so the user can verify/swap camera assignments.
+
+    Shows side-by-side feeds with PROFILE/FRONT labels.
+    Press 's' to swap, Enter/Space to confirm, 'q' to quit the script.
+
+    Returns (final_profile_mxid, final_front_mxid).
+    """
+    log("=" * 48)
+    log("Camera Preview - Verify Assignments")
+    log("=" * 48)
+    log(f"  Profile: {profile_mxid}")
+    log(f"  Front:   {front_mxid}")
+    log("  Press 's' to swap  |  Enter/Space to confirm  |  'q' to quit")
+    log("")
+
+    swapped = False
+
+    try:
+        with contextlib.ExitStack() as stack:
+            log("Connecting to profile camera (preview)...")
+            profile_dev = stack.enter_context(
+                dai.Device(profile_info, dai.UsbSpeed.HIGH))
+            log(f"  Connected: {profile_dev.getDeviceName()}")
+            time.sleep(2.0)
+
+            log("Connecting to front camera (preview)...")
+            front_dev = stack.enter_context(
+                dai.Device(front_info, dai.UsbSpeed.HIGH))
+            log(f"  Connected: {front_dev.getDeviceName()}")
+            time.sleep(2.0)
+
+            # Camera-only pipelines (no NN)
+            log("Building preview pipelines...")
+            profile_pipeline = stack.enter_context(
+                dai.Pipeline(profile_dev))
+            p_cam = profile_pipeline.create(dai.node.Camera).build()
+            p_q = p_cam.requestOutput((512, 288)).createOutputQueue()
+
+            front_pipeline = stack.enter_context(
+                dai.Pipeline(front_dev))
+            f_cam = front_pipeline.create(dai.node.Camera).build()
+            f_q = f_cam.requestOutput((512, 288)).createOutputQueue()
+
+            log("Starting preview...")
+            profile_pipeline.start()
+            time.sleep(2.0)
+            front_pipeline.start()
+            log("Both cameras running. Press Enter/Space to confirm, "
+                "'s' to swap, 'q' to quit.\n")
+
+            profile_frame = None
+            front_frame = None
+            fps_count = 0
+            fps_timer = time.monotonic()
+            fps_value = 0.0
+
+            while (profile_pipeline.isRunning()
+                   and front_pipeline.isRunning()):
+                p_msg = p_q.tryGet()
+                f_msg = f_q.tryGet()
+
+                if p_msg is not None:
+                    raw = p_msg.getCvFrame()
+                    if DISPLAY_SCALE != 1.0:
+                        nw = int(raw.shape[1] * DISPLAY_SCALE)
+                        nh = int(raw.shape[0] * DISPLAY_SCALE)
+                        profile_frame = cv2.resize(raw, (nw, nh))
+                    else:
+                        profile_frame = raw.copy()
+
+                if f_msg is not None:
+                    raw = f_msg.getCvFrame()
+                    if DISPLAY_SCALE != 1.0:
+                        nw = int(raw.shape[1] * DISPLAY_SCALE)
+                        nh = int(raw.shape[0] * DISPLAY_SCALE)
+                        front_frame = cv2.resize(raw, (nw, nh))
+                    else:
+                        front_frame = raw.copy()
+
+                if profile_frame is not None and front_frame is not None:
+                    fps_count += 1
+                    elapsed = time.monotonic() - fps_timer
+                    if elapsed >= 1.0:
+                        fps_value = fps_count / elapsed
+                        fps_count = 0
+                        fps_timer = time.monotonic()
+
+                    # Resize to same height
+                    cam_h = max(profile_frame.shape[0],
+                                front_frame.shape[0])
+                    pf = profile_frame
+                    ff = front_frame
+                    if pf.shape[0] != cam_h:
+                        s = cam_h / pf.shape[0]
+                        pf = cv2.resize(
+                            pf, (int(pf.shape[1] * s), cam_h))
+                    if ff.shape[0] != cam_h:
+                        s = cam_h / ff.shape[0]
+                        ff = cv2.resize(
+                            ff, (int(ff.shape[1] * s), cam_h))
+
+                    # Labels based on swap state
+                    if swapped:
+                        left_label = "FRONT"
+                        right_label = "PROFILE"
+                        left_id = front_mxid[-6:]
+                        right_id = profile_mxid[-6:]
+                    else:
+                        left_label = "PROFILE"
+                        right_label = "FRONT"
+                        left_id = profile_mxid[-6:]
+                        right_id = front_mxid[-6:]
+
+                    # Draw labels
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    for frame, label, dev_id in [
+                        (pf, left_label, left_id),
+                        (ff, right_label, right_id),
+                    ]:
+                        color = ((0, 255, 0) if label == "PROFILE"
+                                 else (255, 200, 0))
+                        cv2.putText(frame, label, (10, 30), font, 0.8,
+                                    (0, 0, 0), 3, cv2.LINE_AA)
+                        cv2.putText(frame, label, (10, 30), font, 0.8,
+                                    color, 2, cv2.LINE_AA)
+                        cv2.putText(frame, f"ID: ...{dev_id}",
+                                    (10, 55), font, 0.45,
+                                    (0, 0, 0), 2, cv2.LINE_AA)
+                        cv2.putText(frame, f"ID: ...{dev_id}",
+                                    (10, 55), font, 0.45,
+                                    (200, 200, 200), 1, cv2.LINE_AA)
+
+                    # Separator and combine
+                    sep = np.full((cam_h, 3, 3), (100, 100, 100),
+                                  dtype=np.uint8)
+                    combined = np.hstack([pf, sep, ff])
+
+                    # Bottom bar with instructions
+                    h, w = combined.shape[:2]
+                    bar_h = 30
+                    combined[-bar_h:, :] = (40, 40, 40)
+                    status = "SWAPPED" if swapped else "ORIGINAL"
+                    cv2.putText(
+                        combined,
+                        f"FPS: {fps_value:.1f}  |  [{status}]  "
+                        f"|  's' swap  |  Enter/Space confirm  "
+                        f"|  'q' quit",
+                        (10, h - 10), font, 0.45,
+                        (180, 180, 180), 1, cv2.LINE_AA)
+
+                    cv2.imshow(
+                        "Camera Preview - Verify Assignments",
+                        combined)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    log("Preview: User quit.")
+                    cv2.destroyAllWindows()
+                    sys.exit(0)
+                if key == ord("s"):
+                    swapped = not swapped
+                    state = "SWAPPED" if swapped else "ORIGINAL"
+                    log(f"Preview: Camera assignments {state}")
+                if key in (13, 32):  # Enter or Space
+                    log("Preview: Confirmed camera assignments.")
+                    break
+
+            cv2.destroyAllWindows()
+
+    except RuntimeError as exc:
+        if "X_LINK" in str(exc) or "device" in str(exc).lower():
+            log("\nERROR: Could not connect to camera during preview.")
+            log("  1. Make sure both cameras are plugged in")
+            log("  2. Close other apps using the cameras")
+            sys.exit(1)
+        raise
+
+    # Wait for both devices to re-enumerate on USB after preview release
+    log("Waiting for cameras to re-enumerate on USB...")
+    target_ids = {profile_mxid, front_mxid}
+    for attempt in range(30):  # up to ~15 seconds
+        time.sleep(0.5)
+        found_ids = {d.deviceId
+                     for d in dai.Device.getAllAvailableDevices()}
+        if target_ids <= found_ids:
+            log("  Both cameras available.")
+            break
+    else:
+        log("WARNING: Timed out waiting for cameras to re-appear. "
+            "Proceeding anyway...")
+
+    if swapped:
+        log(f"  Final Profile: {front_mxid}")
+        log(f"  Final Front:   {profile_mxid}")
+        return front_mxid, profile_mxid
+    else:
+        log(f"  Final Profile: {profile_mxid}")
+        log(f"  Final Front:   {front_mxid}")
+        return profile_mxid, front_mxid
+
+
+# ---------------------------------------------------------------------------
 # Logging helper
 # ---------------------------------------------------------------------------
 def log(msg):
@@ -1384,6 +1589,9 @@ def main():
     parser.add_argument(
         "--alert-log", default="reba_alerts.csv",
         help="Alert log CSV (default: reba_alerts.csv)")
+    parser.add_argument(
+        "--no-preview", action="store_true",
+        help="Skip the camera preview phase (go straight to REBA analysis)")
 
     # Manual flags (conditions that can't be detected by camera)
     parser.add_argument("--arm-supported", action="store_true",
@@ -1463,6 +1671,22 @@ def main():
     # --- Initialize devices ---
     profile_info, front_info = initialize_devices(
         args.profile_camera, args.front_camera)
+
+    # --- Camera preview phase ---
+    if not args.no_preview:
+        final_profile, final_front = run_camera_preview(
+            profile_info, front_info,
+            args.profile_camera, args.front_camera)
+        if (final_profile != args.profile_camera
+                or final_front != args.front_camera):
+            log("Re-initializing devices with swapped assignments...")
+            args.profile_camera = final_profile
+            args.front_camera = final_front
+            profile_info, front_info = initialize_devices(
+                args.profile_camera, args.front_camera)
+        log("")
+    else:
+        log("Skipping camera preview (--no-preview).\n")
 
     smoother = ScoreSmoother()
     alert_logger = AlertLogger(args.alert_log)
