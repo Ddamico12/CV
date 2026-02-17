@@ -9,6 +9,7 @@ Three operating modes:
 | `test_pose_angles_webcam.py` | Host CPU (webcam) | Any webcam |
 | `oak_pose_angles.py` | OAK-D Pro VPU (on-device) | 1x Luxonis OAK-D Pro + USB 3 cable |
 | `oak_dual_camera_reba.py` | OAK-D Pro VPU (on-device, dual) | 2x Luxonis OAK-D Pro + USB cables |
+| `oak_dual_camera_preview.py` | Camera only (no NN) | 2x Luxonis OAK-D Pro + USB cables |
 
 ## Requirements
 
@@ -92,7 +93,24 @@ python oak_pose_angles.py
 python oak_pose_angles.py --csv session1.csv --video session1.mp4
 ```
 
-### OAK-D Pro dual-camera script
+### Dual-camera preview (for placement)
+
+Displays live feeds from both cameras side by side with no neural network processing. Use this to position your cameras before running the REBA script.
+
+```powershell
+# List devices
+python oak_dual_camera_preview.py --list-devices
+
+# Run with explicit camera assignment
+python oak_dual_camera_preview.py --profile-camera <MXID> --front-camera <MXID>
+
+# Auto-detect (when exactly 2 cameras are connected)
+python oak_dual_camera_preview.py
+```
+
+Press **s** to swap the PROFILE/FRONT labels if the cameras are assigned to the wrong views. Press **q** to quit.
+
+### OAK-D Pro dual-camera REBA script
 
 Uses two OAK-D Pro cameras (one profile/side view, one front view) to compute a fused REBA score. The front camera auto-detects posture conditions that normally require manual CLI flags: trunk twist, trunk side-bend, neck twist, neck side-bend, arm abduction, shoulder raised, and unilateral stance.
 
@@ -300,6 +318,7 @@ The skeleton overlay and table text are colored by REBA component score:
 CV/
   test_pose_angles_webcam.py   # REBA scoring via webcam (host CPU)
   oak_pose_angles.py           # Single-camera REBA on OAK-D Pro (on-device)
+  oak_dual_camera_preview.py   # Dual-camera live preview for placement
   oak_dual_camera_reba.py      # Dual-camera fused REBA on 2x OAK-D Pro
   README.md                    # This file
   joint_angles.csv             # Generated: single-camera angles/scores per frame
